@@ -71,7 +71,7 @@ load_camtrap_data <- function(path = "data/camtrap_data.RData",
       detection_id = sprintf("CT-%05d", dplyr::row_number()),
       station_id = Station,
       date = parse_dmy(Date),
-      datetime = as.POSIXct(paste(Date, Time), format = "%d-%b-%y %H:%M", tz = "UTC"),
+      datetime = as.POSIXct(paste(Date, Time), format = "%d-%b-%y %H:%M", tz = "Asia/Jakarta"),
       scientific_name = trimws(Scientific.Name),
       species_id = slugify_species(scientific_name),
       count = suppressWarnings(as.numeric(Count)),
@@ -86,8 +86,34 @@ load_camtrap_data <- function(path = "data/camtrap_data.RData",
     dplyr::select(detection_id, station_id, session, date, datetime,
                    scientific_name, species_id, count)
 
+  # ---- Independent events -----------------------------------------------------
+  # Camera trap analyses (species-composition charts, RAI) are conventionally
+  # based on independent EVENTS, not raw images - multiple photos of the same
+  # animal triggered seconds apart at one station are one event, not several
+  # detections. camtrapR::assessTemporalIndependence (standard camera-trap
+  # methodology: a record is independent of the prior one for the same
+  # station+species if >= minDeltaTime minutes have elapsed) collapses
+  # camera_detections down to just the independent records - it returns the
+  # same columns (plus delta-time/n_images columns, dropped here since
+  # nothing downstream needs them), so this can be filtered by date/station
+  # exactly like camera_detections.
+  camera_independent_events <- camera_detections |>
+    as.data.frame() |>
+    camtrapR:::assessTemporalIndependence(
+      deltaTimeComparedTo = "lastIndependentRecord",
+      columnOfInterest = "species_id",
+      recordDateTimeCol = "datetime",
+      stationCol = "station_id",
+      minDeltaTime = 30,
+      camerasIndependent = FALSE
+    ) |>
+    tibble::as_tibble() |>
+    dplyr::select(detection_id, station_id, session, date, datetime,
+                   scientific_name, species_id, count)
+
   list(
     camera_sites = camera_sites,
-    camera_detections = camera_detections
+    camera_detections = camera_detections,
+    camera_independent_events = camera_independent_events
   )
 }

@@ -60,6 +60,30 @@ add_kphp_boundary <- function(map, kphp_boundary) {
     )
 }
 
+# Shared base map for Camera Trap and Bioacoustics: KPHP VII boundary +
+# monitoring grid (data/Grid_hexa.shp) rendered via mapview instead of plain
+# leaflet::addPolygons, per explicit request for this styling. mapview()
+# objects wrap a real leaflet map in their @map slot, so the result can still
+# be piped straight into ordinary addCircleMarkers()/addLegend() calls for
+# the station markers layered on top.
+kphp_grid_base_map <- function(kphp_boundary, monitoring_grid) {
+  m <- (
+    mapview::mapview(
+      kphp_boundary, layer.name = "KPHP VII", color = "#D7301F", col.regions = "#FC8D59",
+      lwd = 1, map.types = c("OpenStreetMap", "Esri.WorldImagery"), alpha.regions = 0
+    ) +
+      mapview::mapview(
+        monitoring_grid, layer.name = "Grid", color = "#2C3E50", col.regions = "#74A9CF",
+        lwd = 1, alpha.regions = 0.05
+      )
+  )@map
+  # mapview auto-adds its own layers control for the KPHP/Grid layers, but
+  # callers always add a station-markers layer on top that control doesn't
+  # know about - strip it so the caller can add a single, complete control
+  # (base tiles + KPHP + Grid + its own marker group) instead of stacking two.
+  leaflet::removeLayersControl(m)
+}
+
 # CPUE (catch/sighting-per-unit-effort) with standard error, computed the
 # proper way for a ratio estimator: per-PATROL rate (including patrols with
 # zero sightings of a given group, not just the patrols where it showed up),

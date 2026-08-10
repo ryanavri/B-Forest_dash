@@ -137,8 +137,8 @@ mod_summary_server <- function(id, data) {
           data = data$acoustic_sites, lng = ~lon, lat = ~lat,
           radius = 6, color = "#2ca02c", fillOpacity = 0.85, stroke = FALSE,
           group = "Acoustic Recorders",
-          popup = ~sprintf("<b>%s</b><br>Acoustic recorder<br>Habitat: %s<br>Status: %s",
-                            recorder_id, habitat, status)
+          popup = ~sprintf("<b>%s</b><br>Acoustic recorder<br>Site: %s<br>Unit: %s",
+                            recorder_id, site, unit)
         )
 
       tracks <- dplyr::filter(data$patrol_tracks, has_track)

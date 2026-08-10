@@ -144,50 +144,6 @@ generate_biodash_data <- function(seed = 42, taxon_path = "data/taxon_reference.
   # sightings and reuses this same visually-detectable species set.
   cam_species <- dplyr::filter(species, method %in% c("camera", "both"))
 
-  # ---- Bioacoustic sites & effort ------------------------------------------
-  n_ar <- 12
-  acoustic_sites <- dplyr::bind_cols(
-    tibble::tibble(
-      recorder_id = sprintf("AR-%02d", 1:n_ar),
-      habitat = sample(habitats, n_ar, replace = TRUE),
-      elevation_m = round(runif(n_ar, 40, 950)),
-      deploy_date = study_start + sample(0:60, n_ar, replace = TRUE)
-    ),
-    jitter_latlon(n_ar)
-  ) |>
-    dplyr::mutate(
-      retrieval_date = pmin(deploy_date + sample(180:545, n_ar, replace = TRUE), today),
-      recording_days = as.integer(retrieval_date - deploy_date),
-      # Duty-cycled recording schedule (hours actually recorded per day),
-      # e.g. dawn/dusk-only vs. continuous - varies by recorder programming.
-      hours_per_day = sample(c(4, 6, 8, 12, 24), n_ar, replace = TRUE,
-                               prob = c(0.15, 0.2, 0.25, 0.2, 0.2)),
-      recording_hours = recording_days * hours_per_day,
-      status = ifelse(retrieval_date >= today - 14, "Active", "Retrieved")
-    )
-
-  # ---- Bioacoustic detections -----------------------------------------------
-  ac_species <- dplyr::filter(species, method %in% c("acoustic", "both"))
-  n_ac_det <- 1900
-  acoustic_detections <- tibble::tibble(
-    detection_id = sprintf("ARD-%05d", 1:n_ac_det),
-    recorder_id = sample(acoustic_sites$recorder_id, n_ac_det, replace = TRUE),
-    species_id = sample(ac_species$species_id, n_ac_det, replace = TRUE,
-                         prob = rev(seq_len(nrow(ac_species)))^1.2),
-    confidence = round(pmin(1, rbeta(n_ac_det, 6, 2)), 2)
-  ) |>
-    dplyr::left_join(dplyr::select(acoustic_sites, recorder_id, deploy_date, retrieval_date),
-                      by = "recorder_id") |>
-    dplyr::rowwise() |>
-    dplyr::mutate(
-      obs_date = deploy_date + sample(0:as.integer(retrieval_date - deploy_date), 1),
-      hour = sample_hours(1, activity_type[[species_id]]),
-      datetime = as.POSIXct(obs_date) + lubridate::hours(hour) + lubridate::minutes(sample(0:59, 1))
-    ) |>
-    dplyr::ungroup() |>
-    dplyr::mutate(session_id = assign_session(datetime)) |>
-    dplyr::select(detection_id, recorder_id, species_id, datetime, confidence, session_id)
-
   # ---- Transect routes ---------------------------------------------------------
   n_tx <- 8
   km_per_deg_lat <- 111
@@ -453,8 +409,6 @@ generate_biodash_data <- function(seed = 42, taxon_path = "data/taxon_reference.
     species = species,
     conservation_status_ref = conservation_status_ref,
     sessions = sessions,
-    acoustic_sites = acoustic_sites,
-    acoustic_detections = acoustic_detections,
     transect_routes = transect_routes,
     transect_surveys = transect_surveys,
     transect_observations = transect_observations,

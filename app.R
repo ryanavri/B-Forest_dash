@@ -42,6 +42,15 @@ biodash_data$kphp_boundary <- tryCatch(
   }
 )
 
+# Monitoring grid (Camera Trap tab's mapview-based station maps).
+biodash_data$monitoring_grid <- tryCatch(
+  sf::st_read("data/Grid_hexa.shp", quiet = TRUE),
+  error = function(e) {
+    warning("Could not load data/Grid_hexa.shp: ", conditionMessage(e))
+    NULL
+  }
+)
+
 # Real SMART patrol data (Kerinci-Seblat landscape) - replaces the mock
 # patrol_teams/patrols/patrol_observations with real field data, and adds
 # patrol_tracks (actual GPS routes) + smart_meta (data provenance).
@@ -60,44 +69,63 @@ biodash_data$smart_meta <- smart$smart_meta
 camtrap <- load_camtrap_data("data/camtrap_data.RData")
 biodash_data$camera_sites <- camtrap$camera_sites
 biodash_data$camera_detections <- camtrap$camera_detections
+biodash_data$camera_independent_events <- camtrap$camera_independent_events
+
+# Real bioacoustic / PAM data (Kerinci-Seblat landscape) - replaces the mock
+# acoustic_sites/acoustic_detections with real recorder deployment/detection
+# records. See R/load_pam_data.R for the pam_detection/pam_effort -> app
+# schema translation.
+pam <- load_pam_data("data/pam_data.RData")
+biodash_data$acoustic_sites <- pam$acoustic_sites
+biodash_data$acoustic_detections <- pam$acoustic_detections
 
 ui <- page_navbar(
   title = "Biodash",
+  # Tracks which top-level nav_panel is selected (input$main_nav) - needed
+  # by modules with nested sub-tabs so DT tables and mapview-based leaflet
+  # maps can tell whether their tab is genuinely visible, not just whether
+  # their own inner subtab happens to be selected (see [[biodash-shiny-
+  # gotchas]] memory / the comment by unsuspend_all() in those modules).
+  # nav_panel() titles collide across the three navbar dropdowns (three
+  # "Summary" panels) so every panel gets an explicit, unique `value`.
+  id = "main_nav",
   theme = bs_theme(version = 5, bootswatch = "flatly", primary = "#2c6e49"),
   fillable = FALSE,
   nav_menu(
     title = "Biodiversity",
     icon = icon("paw"),
-    nav_panel("Summary", mod_summary_ui("summary")),
-    nav_panel("Camera Trap", icon = icon("camera"), mod_camera_trap_ui("camera")),
-    nav_panel("Bioacoustics", icon = icon("volume-up"), mod_bioacoustics_ui("acoustic")),
-    nav_panel("SMART Patrol", icon = icon("route"), mod_smart_patrol_ui("patrol")),
-    nav_panel("Transect-based Survey", icon = icon("road"), mod_transect_ui("transect"))
+    nav_panel("Summary", value = "Biodiversity Summary", mod_summary_ui("summary")),
+    nav_panel("Camera Trap", value = "Camera Trap", icon = icon("camera"), mod_camera_trap_ui("camera")),
+    nav_panel("Bioacoustics", value = "Bioacoustics", icon = icon("volume-up"), mod_bioacoustics_ui("acoustic")),
+    nav_panel("SMART Patrol", value = "SMART Patrol", icon = icon("route"), mod_smart_patrol_ui("patrol")),
+    nav_panel("Transect-based Survey", value = "Transect-based Survey", icon = icon("road"), mod_transect_ui("transect"))
   ),
   nav_menu(
     title = "Restoration",
     icon = icon("tree"),
-    nav_panel("Summary", mod_restoration_summary_ui("restoration_summary")),
-    nav_panel("Restoration Effort", icon = icon("tree"), mod_restoration_ui("restoration")),
-    nav_panel("Nursery", icon = icon("seedling"), mod_nursery_ui("nursery"))
+    nav_panel("Summary", value = "Restoration Summary", mod_restoration_summary_ui("restoration_summary")),
+    nav_panel("Restoration Effort", value = "Restoration Effort", icon = icon("tree"), mod_restoration_ui("restoration")),
+    nav_panel("Nursery", value = "Nursery", icon = icon("seedling"), mod_nursery_ui("nursery"))
   ),
   nav_menu(
     title = "Carbon Stock",
     icon = icon("cloud"),
-    nav_panel("Summary", mod_carbon_summary_ui("carbon_summary")),
-    nav_panel("ARR Potential", icon = icon("seedling"), mod_carbon_arr_ui("carbon_arr")),
-    nav_panel("REDD++ Potential", icon = icon("shield-halved"), mod_carbon_redd_ui("carbon_redd"))
+    nav_panel("Summary", value = "Carbon Stock Summary", mod_carbon_summary_ui("carbon_summary")),
+    nav_panel("ARR Potential", value = "ARR Potential", icon = icon("seedling"), mod_carbon_arr_ui("carbon_arr")),
+    nav_panel("REDD++ Potential", value = "REDD++ Potential", icon = icon("shield-halved"), mod_carbon_redd_ui("carbon_redd"))
   ),
   nav_spacer(),
   nav_item(tags$span(class = "navbar-text text-light", "B-Forest"))
 )
 
 server <- function(input, output, session) {
+  main_tab <- reactive(input$main_nav)
+
   mod_summary_server("summary", data = biodash_data)
-  mod_camera_trap_server("camera", data = biodash_data)
-  mod_bioacoustics_server("acoustic", data = biodash_data)
-  mod_smart_patrol_server("patrol", data = biodash_data)
-  mod_transect_server("transect", data = biodash_data)
+  mod_camera_trap_server("camera", data = biodash_data, active_tab = main_tab)
+  mod_bioacoustics_server("acoustic", data = biodash_data, active_tab = main_tab)
+  mod_smart_patrol_server("patrol", data = biodash_data, active_tab = main_tab)
+  mod_transect_server("transect", data = biodash_data, active_tab = main_tab)
   mod_restoration_summary_server("restoration_summary", data = biodash_data)
   mod_restoration_server("restoration", data = biodash_data)
   mod_nursery_server("nursery", data = biodash_data)

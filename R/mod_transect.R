@@ -189,7 +189,7 @@ mod_transect_ui <- function(id) {
   )
 }
 
-mod_transect_server <- function(id, data) {
+mod_transect_server <- function(id, data, active_tab) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     tx_species <- dplyr::filter(data$species, method %in% c("camera", "both"))
@@ -301,7 +301,7 @@ mod_transect_server <- function(id, data) {
     })
 
     output$table <- renderDT({
-      req(input$subtab == "Overall Effort")
+      req(active_tab() == "Transect-based Survey", input$subtab == "Overall Effort")
       df <- filtered() |>
         dplyr::left_join(dplyr::select(data$transect_routes, transect_id, transect_name), by = "transect_id") |>
         dplyr::arrange(dplyr::desc(datetime)) |>
@@ -481,7 +481,7 @@ mod_transect_server <- function(id, data) {
     })
 
     output$profile_table <- renderDT({
-      req(input$subtab == "Species Information")
+      req(active_tab() == "Transect-based Survey", input$subtab == "Species Information")
       df <- profile_data() |>
         dplyr::left_join(dplyr::select(data$transect_routes, transect_id, transect_name), by = "transect_id") |>
         dplyr::arrange(dplyr::desc(datetime)) |>
@@ -536,7 +536,7 @@ mod_transect_server <- function(id, data) {
     })
 
     output$roster <- renderDT({
-      req(input$subtab == "Active Transect")
+      req(active_tab() == "Transect-based Survey", input$subtab == "Active Transect")
       df <- active_view() |>
         dplyr::mutate(
           Established = format(established_date, "%d %b %Y"),

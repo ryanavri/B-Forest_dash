@@ -1,9 +1,13 @@
 # ---- Bioacoustics detail tab -------------------------------------------------
-# Two sub-tabs, mirroring Camera Trap:
+# Runs on real PAM (passive acoustic monitoring) data (data/pam_data.RData) -
+# see R/load_pam_data.R for the pam_detection/pam_effort -> app schema
+# translation. Two sub-tabs, mirroring Camera Trap:
 #  - "Overall Effort": park-wide bioacoustic dashboard (recording hours,
 #    detections, station coverage, species richness).
 #  - "Species Information": single-species profile (ID card, detection
-#    rate by station, diel calling pattern, elevation response, map/records).
+#    rate by station, diel calling pattern, map/records). The real recorder
+#    deployment log has no elevation data, so (unlike the old mock-data
+#    version) there's no "Species Response to Elevation" chart here.
 
 mod_bioacoustics_ui <- function(id) {
   ns <- NS(id)
@@ -14,8 +18,6 @@ mod_bioacoustics_ui <- function(id) {
       title = "Filters",
       width = 280,
       dateRangeInput(ns("date_range"), "Date range", start = NULL, end = NULL),
-      selectizeInput(ns("sessions"), "Session", choices = NULL, multiple = TRUE,
-                      options = list(placeholder = "All sessions")),
       selectizeInput(ns("recorders"), "Recorders", choices = NULL, multiple = TRUE,
                       options = list(placeholder = "All recorders")),
       selectizeInput(ns("species"), "Species", choices = NULL, multiple = TRUE,
@@ -114,15 +116,6 @@ mod_bioacoustics_ui <- function(id) {
           col_widths = 12,
           card(
             full_screen = TRUE,
-            card_header("Species Response to Elevation"),
-            plotlyOutput(ns("profile_elevation"), height = "300px")
-          )
-        ),
-        layout_columns(
-          class = "mb-4",
-          col_widths = 12,
-          card(
-            full_screen = TRUE,
             card_header("Where This Species Was Detected"),
             leafletOutput(ns("profile_map"), height = "380px")
           )
@@ -137,25 +130,31 @@ mod_bioacoustics_ui <- function(id) {
   )
 }
 
-mod_bioacoustics_server <- function(id, data) {
+mod_bioacoustics_server <- function(id, data, active_tab) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    ac_species <- dplyr::filter(data$species, method %in% c("acoustic", "both"))
+    # data$species's "method" field is a heuristic used only to drive the
+    # MOCK generators elsewhere (e.g. it tags all birds "acoustic") - it says
+    # nothing about what the real PAM survey actually recorded, so it must
+    # NOT be used to filter which species this module knows about. The
+    # species universe here is simply whatever data$acoustic_detections
+    # actually contains.
+    ac_species <- data$species
+    ac_species_detected <- dplyr::filter(ac_species, species_id %in% unique(data$acoustic_detections$species_id))
     taxon_icon <- function(taxon) {
       switch(taxon, Mammal = "paw", Bird = "dove", Amphibian = "frog", "paw")
     }
 
     observe({
+      det_range <- range(as.Date(data$acoustic_detections$datetime))
       updateDateRangeInput(session, "date_range",
-        start = data$study_start, end = data$today,
-        min = data$study_start, max = data$today)
-      updateSelectizeInput(session, "sessions",
-        choices = stats::setNames(data$sessions$session_id, data$sessions$label), server = TRUE)
+        start = det_range[1], end = det_range[2],
+        min = det_range[1], max = det_range[2])
       updateSelectizeInput(session, "recorders", choices = sort(data$acoustic_sites$recorder_id), server = TRUE)
       updateSelectizeInput(session, "species",
-        choices = stats::setNames(ac_species$species_id, ac_species$common_name), server = TRUE)
+        choices = stats::setNames(ac_species_detected$species_id, ac_species_detected$common_name), server = TRUE)
       updateSelectInput(session, "species_profile",
-        choices = stats::setNames(ac_species$species_id, ac_species$common_name))
+        choices = stats::setNames(ac_species_detected$species_id, ac_species_detected$common_name))
     })
 
     # Recorders in scope per the sidebar "Recorders" picker (ignores
@@ -173,14 +172,20 @@ mod_bioacoustics_server <- function(id, data) {
         dplyr::filter(as.Date(datetime) >= input$date_range[1],
                        as.Date(datetime) <= input$date_range[2],
                        recorder_id %in% station_pool()$recorder_id)
-      if (length(input$sessions) > 0) df <- dplyr::filter(df, session_id %in% input$sessions)
       if (length(input$species) > 0) df <- dplyr::filter(df, species_id %in% input$species)
-      df |> dplyr::left_join(ac_species, by = "species_id")
+      # ac_species also carries its own "scientific_name" (identical value,
+      # since species_id is derived from it either way) - drop it from the
+      # join side so the result keeps one unambiguous scientific_name column
+      # instead of dplyr suffixing both into scientific_name.x/.y.
+      df |> dplyr::left_join(dplyr::select(ac_species, -scientific_name), by = "species_id")
     })
 
     output$kpi_hours <- renderText(scales::comma(sum(station_pool()$recording_hours)))
     output$kpi_detections <- renderText(scales::comma(nrow(filtered())))
-    output$kpi_stations <- renderText(scales::comma(dplyr::n_distinct(filtered()$recorder_id)))
+    # Total monitored recorders in scope - same station_pool() the map plots
+    # and kpi_hours sums effort over, not just the subset that happened to
+    # record something (same fix as Camera Trap's kpi_stations).
+    output$kpi_stations <- renderText(scales::comma(nrow(station_pool())))
     output$kpi_richness <- renderText(scales::comma(dplyr::n_distinct(filtered()$species_id)))
 
     output$kpi_protected <- renderText({
@@ -212,42 +217,60 @@ mod_bioacoustics_server <- function(id, data) {
     })
 
     output$map <- renderLeaflet({
+      # mapview-based maps and DT tables need BOTH the outer top-level nav
+      # tab AND this module's own inner subtab to be selected - see the
+      # note by unsuspend_all() at the end of this function for why.
+      req(active_tab() == "Bioacoustics", input$subtab == "Overall Effort")
       counts <- filtered() |> dplyr::count(recorder_id, name = "detections")
       sites <- station_pool() |>
         dplyr::left_join(counts, by = "recorder_id") |>
         dplyr::mutate(detections = tidyr::replace_na(detections, 0))
 
-      leaflet(sites) |>
-        addProviderTiles(providers$OpenStreetMap) |>
+      # Monitoring effort (recording hours), not detections, is what this
+      # map encodes - as a heat color rather than point size, mirroring
+      # Camera Trap's Camera Station Map.
+      pal <- leaflet::colorNumeric(palette = "YlOrRd", domain = sites$recording_hours)
+
+      kphp_grid_base_map(data$kphp_boundary, data$monitoring_grid) |>
         addCircleMarkers(
-          lng = ~lon, lat = ~lat,
-          radius = ~pmax(5, sqrt(detections) * 2),
-          color = "#2ca02c", fillOpacity = 0.75, stroke = FALSE,
-          popup = ~sprintf("<b>%s</b><br>Habitat: %s<br>Detections: %d", recorder_id, habitat, detections)
+          data = sites, lng = ~lon, lat = ~lat, radius = 8,
+          color = ~pal(recording_hours), fillColor = ~pal(recording_hours), fillOpacity = 0.85, stroke = FALSE,
+          popup = ~sprintf("<b>%s</b><br>Site: %s<br>Unit: %s<br>Recording Hours: %s<br>Detections: %d",
+                             recorder_id, site, unit, scales::comma(recording_hours), detections),
+          group = "Acoustic Recorders"
         ) |>
-        add_kphp_boundary(data$kphp_boundary)
+        addLegend(
+          position = "bottomright", pal = pal, values = sites$recording_hours,
+          title = "Recording Hours", opacity = 0.9
+        ) |>
+        addLayersControl(
+          baseGroups = c("OpenStreetMap", "Esri.WorldImagery"),
+          overlayGroups = c("KPHP VII", "Grid", "Acoustic Recorders"),
+          options = layersControlOptions(collapsed = FALSE)
+        )
     })
 
     output$table <- renderDT({
-      req(input$subtab == "Overall Effort")
+      req(active_tab() == "Bioacoustics", input$subtab == "Overall Effort")
       df <- filtered() |>
+        dplyr::left_join(dplyr::select(data$acoustic_sites, recorder_id, site), by = "recorder_id") |>
         dplyr::arrange(dplyr::desc(datetime)) |>
-        dplyr::select(Recorder = recorder_id, Species = common_name, Group = taxon_group,
-                       Status = conservation_status, DateTime = datetime, Confidence = confidence,
-                       Session = session_id)
-      render_download_dt(df, filter = "top", order = list(list(4, "desc")))
+        dplyr::mutate(protected_label = ifelse(protected, "Protected", "Not Protected")) |>
+        dplyr::select(Site = site, Session = session, Station = recorder_id,
+                       `Scientific Name` = scientific_name, `Common Name` = common_name,
+                       DateTime = datetime, `IUCN Status` = conservation_status,
+                       Protected = protected_label)
+      render_download_dt(df, filter = "top", order = list(list(5, "desc")))
     })
 
     # ---- Species Information ---------------------------------------------------
     profile_data <- reactive({
       req(input$date_range, input$species_profile)
-      df <- data$acoustic_detections |>
+      data$acoustic_detections |>
         dplyr::filter(species_id == input$species_profile,
                        as.Date(datetime) >= input$date_range[1],
                        as.Date(datetime) <= input$date_range[2],
                        recorder_id %in% station_pool()$recorder_id)
-      if (length(input$sessions) > 0) df <- dplyr::filter(df, session_id %in% input$sessions)
-      df
     })
 
     output$species_card <- renderUI({
@@ -354,66 +377,62 @@ mod_bioacoustics_server <- function(id, data) {
       ggplotly(p)
     })
 
-    output$profile_elevation <- renderPlotly({
-      df <- profile_data()
-      req(nrow(df) > 0)
-      by_station <- df |>
-        dplyr::count(recorder_id, name = "detections") |>
-        dplyr::left_join(dplyr::select(data$acoustic_sites, recorder_id, elevation_m), by = "recorder_id")
-      req(nrow(by_station) > 0)
-
-      p <- ggplot(by_station, aes(x = elevation_m, y = detections, text = recorder_id)) +
-        geom_point(color = "#2ca02c", size = 3, alpha = 0.8)
-
-      if (nrow(by_station) >= 4) {
-        p <- p + geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
-                              color = "#9467bd", linewidth = 0.7)
-      }
-
-      p <- p +
-        labs(x = "Elevation (m)", y = "Detections") +
-        theme_minimal(base_size = 12)
-      ggplotly(p, tooltip = c("x", "y", "text"))
-    })
-
     output$profile_map <- renderLeaflet({
+      req(active_tab() == "Bioacoustics", input$subtab == "Species Information")
       counts <- profile_data() |> dplyr::count(recorder_id, name = "detections")
       sites <- station_pool() |>
-        dplyr::inner_join(counts, by = "recorder_id")
-
-      m <- leaflet(station_pool()) |>
-        addProviderTiles(providers$OpenStreetMap) |>
-        addCircleMarkers(
-          lng = ~lon, lat = ~lat, radius = 4,
-          color = "#c7c7c7", fillOpacity = 0.5, stroke = FALSE
+        dplyr::left_join(counts, by = "recorder_id") |>
+        dplyr::mutate(
+          detections = tidyr::replace_na(detections, 0),
+          rate = detections / recording_hours * 100
         )
 
-      if (nrow(sites) > 0) {
-        m <- m |>
-          addCircleMarkers(
-            data = sites, lng = ~lon, lat = ~lat,
-            radius = ~pmax(6, sqrt(detections) * 2),
-            color = "#2ca02c", fillOpacity = 0.85, stroke = FALSE,
-            popup = ~sprintf("<b>%s</b><br>Detections: %d", recorder_id, detections)
-          )
-      }
-      m |> add_kphp_boundary(data$kphp_boundary)
+      # Detection rate (detections / 100 recording-hours), not raw detection
+      # count, drives color here - the bioacoustic equivalent of Camera
+      # Trap's RAI map. Every recorder stays the same size regardless of rate.
+      pal <- leaflet::colorNumeric(palette = "YlOrRd", domain = sites$rate)
+
+      kphp_grid_base_map(data$kphp_boundary, data$monitoring_grid) |>
+        addCircleMarkers(
+          data = sites, lng = ~lon, lat = ~lat, radius = 8,
+          color = ~pal(rate), fillColor = ~pal(rate), fillOpacity = 0.85, stroke = FALSE,
+          popup = ~sprintf("<b>%s</b><br>Rate: %.1f<br>Detections: %d", recorder_id, rate, detections),
+          group = "Acoustic Recorders"
+        ) |>
+        addLegend(
+          position = "bottomright", pal = pal, values = sites$rate,
+          title = "Detections / 100h", opacity = 0.9
+        ) |>
+        addLayersControl(
+          baseGroups = c("OpenStreetMap", "Esri.WorldImagery"),
+          overlayGroups = c("KPHP VII", "Grid", "Acoustic Recorders"),
+          options = layersControlOptions(collapsed = FALSE)
+        )
     })
 
     output$profile_table <- renderDT({
-      req(input$subtab == "Species Information")
+      req(active_tab() == "Bioacoustics", input$subtab == "Species Information")
       df <- profile_data() |>
         dplyr::arrange(dplyr::desc(datetime)) |>
-        dplyr::select(Recorder = recorder_id, DateTime = datetime, Confidence = confidence, Session = session_id)
+        dplyr::select(Recorder = recorder_id, DateTime = datetime, Confidence = confidence)
       render_download_dt(df, filter = "top", order = list(list(1, "desc")))
     })
 
+    # DT tables and mapview-based maps (output$map/table/profile_map/
+    # profile_table) additionally gate on `active_tab()` - the *outer*
+    # nav_menu tab (e.g. "Bioacoustics") - on top of `input$subtab` (the
+    # *inner* Overall Effort/Species Information selection). Both are
+    # needed: with suspendWhenHidden disabled, these heavier widgets get
+    # eagerly computed and delivered before the user ever visits their tab,
+    # and if the OUTER tab was still hidden at that moment they silently
+    # never draw (no error, no retry) even though the inner subtab
+    # "looked" selected the whole time. See [[biodash-shiny-gotchas]] memory.
     unsuspend_all(output, c(
       "kpi_hours", "kpi_detections", "kpi_stations", "kpi_richness",
       "kpi_protected", "kpi_cr", "kpi_en", "kpi_vu",
       "plot_species", "map", "table", "species_card",
       "profile_kpi_detections", "profile_kpi_stations", "profile_kpi_first",
-      "profile_kpi_peak_hour", "profile_rate", "profile_diel", "profile_elevation",
+      "profile_kpi_peak_hour", "profile_rate", "profile_diel",
       "profile_map", "profile_table"
     ))
   })

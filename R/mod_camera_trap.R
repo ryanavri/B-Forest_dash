@@ -20,10 +20,10 @@ mod_camera_trap_ui <- function(id) {
       title = "Filters",
       width = 280,
       dateRangeInput(ns("date_range"), "Date range", start = NULL, end = NULL),
+      selectizeInput(ns("sessions"), "Session", choices = NULL, multiple = TRUE,
+                      options = list(placeholder = "All sessions")),
       selectizeInput(ns("stations"), "Stations", choices = NULL, multiple = TRUE,
-                      options = list(placeholder = "All stations")),
-      selectizeInput(ns("species"), "Species", choices = NULL, multiple = TRUE,
-                      options = list(placeholder = "All species (Overall Effort tab)"))
+                      options = list(placeholder = "All stations"))
     ),
     navset_tab(
       id = ns("subtab"),
@@ -59,7 +59,7 @@ mod_camera_trap_ui <- function(id) {
           col_widths = c(5, 7),
           card(
             full_screen = TRUE,
-            card_header("Top Detected Species"),
+            card_header("Top Detected Species (Independent Events)"),
             plotlyOutput(ns("plot_species"), height = "340px")
           ),
           card(
@@ -104,7 +104,7 @@ mod_camera_trap_ui <- function(id) {
           col_widths = c(6, 6),
           card(
             full_screen = TRUE,
-            card_header("RAI by Station (detections / 100 trap-nights)"),
+            card_header("RAI by Station (independent events / 100 trap-nights)"),
             plotlyOutput(ns("profile_rai"), height = "320px")
           ),
           card(
@@ -132,7 +132,7 @@ mod_camera_trap_ui <- function(id) {
   )
 }
 
-mod_camera_trap_server <- function(id, data) {
+mod_camera_trap_server <- function(id, data, active_tab) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     # data$species's "method" field is a heuristic used only to drive the
@@ -155,9 +155,9 @@ mod_camera_trap_server <- function(id, data) {
       updateDateRangeInput(session, "date_range",
         start = det_range[1], end = det_range[2],
         min = det_range[1], max = det_range[2])
+      updateSelectizeInput(session, "sessions",
+        choices = sort(unique(as.character(data$camera_detections$session))), server = TRUE)
       updateSelectizeInput(session, "stations", choices = sort(data$camera_sites$station_id), server = TRUE)
-      updateSelectizeInput(session, "species",
-        choices = stats::setNames(cam_species_detected$species_id, cam_species_detected$common_name), server = TRUE)
       updateSelectInput(session, "species_profile",
         choices = stats::setNames(cam_species_detected$species_id, cam_species_detected$common_name))
     })
@@ -176,13 +176,39 @@ mod_camera_trap_server <- function(id, data) {
       df <- data$camera_detections |>
         dplyr::filter(date >= input$date_range[1], date <= input$date_range[2],
                        station_id %in% station_pool()$station_id)
-      if (length(input$species) > 0) df <- dplyr::filter(df, species_id %in% input$species)
-      df |> dplyr::left_join(cam_species, by = "species_id")
+      if (length(input$sessions) > 0) df <- dplyr::filter(df, as.character(session) %in% input$sessions)
+      # cam_species also carries its own "scientific_name" (identical value,
+      # since species_id is derived from it either way) - drop it from the
+      # join side so the result keeps one unambiguous scientific_name column
+      # instead of dplyr suffixing both into scientific_name.x/.y.
+      df |> dplyr::left_join(dplyr::select(cam_species, -scientific_name), by = "species_id")
+    })
+
+    # Independent camera-trap events (see R/load_camtrap_data.R), same filter
+    # scope as filtered() - the correct basis for species-composition and
+    # rate-based charts, since a single animal triggering a burst of photos
+    # a few seconds apart is one event, not several detections.
+    filtered_independent <- reactive({
+      req(input$date_range)
+      df <- data$camera_independent_events |>
+        dplyr::filter(date >= input$date_range[1], date <= input$date_range[2],
+                       station_id %in% station_pool()$station_id)
+      if (length(input$sessions) > 0) df <- dplyr::filter(df, as.character(session) %in% input$sessions)
+      # cam_species also carries its own "scientific_name" (identical value,
+      # since species_id is derived from it either way) - drop it from the
+      # join side so the result keeps one unambiguous scientific_name column
+      # instead of dplyr suffixing both into scientific_name.x/.y.
+      df |> dplyr::left_join(dplyr::select(cam_species, -scientific_name), by = "species_id")
     })
 
     output$kpi_nights <- renderText(scales::comma(sum(station_pool()$trap_nights)))
     output$kpi_detections <- renderText(scales::comma(sum(filtered()$count)))
-    output$kpi_stations <- renderText(scales::comma(dplyr::n_distinct(filtered()$station_id)))
+    # Total monitored stations in scope - same station_pool() the map plots
+    # and kpi_nights sums effort over, not just the subset that happened to
+    # catch something (n_distinct(filtered()$station_id) undercounts: a
+    # station with zero detections still contributed trap-nights and still
+    # shows a dot on the map, so it belongs in this count too).
+    output$kpi_stations <- renderText(scales::comma(nrow(station_pool())))
     output$kpi_richness <- renderText(scales::comma(dplyr::n_distinct(filtered()$species_id)))
 
     output$kpi_protected <- renderText({
@@ -199,55 +225,93 @@ mod_camera_trap_server <- function(id, data) {
     })
 
     output$plot_species <- renderPlotly({
-      df <- filtered()
+      df <- filtered_independent()
       req(nrow(df) > 0)
       top <- df |>
-        dplyr::group_by(common_name) |>
-        dplyr::summarise(detections = sum(count), .groups = "drop") |>
-        dplyr::slice_max(detections, n = 10) |>
-        dplyr::arrange(detections)
+        dplyr::count(common_name, name = "events") |>
+        dplyr::slice_max(events, n = 10) |>
+        dplyr::arrange(events)
 
-      p <- ggplot(top, aes(x = detections, y = reorder(common_name, detections))) +
+      p <- ggplot(top, aes(x = events, y = reorder(common_name, events))) +
         geom_col(fill = "#2c6e49") +
-        labs(x = "Detections", y = NULL) +
+        labs(x = "Independent events", y = NULL) +
         theme_minimal(base_size = 12)
       ggplotly(p, tooltip = c("x", "y"))
     })
 
     output$map <- renderLeaflet({
+      # mapview-based maps (see kphp_grid_base_map() in R/utils.R) have the
+      # same hidden-tab race condition as DT tables - their heavier
+      # multi-layer init silently never draws if the container was still
+      # hidden when the widget was delivered, with no automatic retry.
+      # Gating on the navset's own selected-tab input (same fix as DT)
+      # guarantees this only (re)renders once its tab is genuinely visible.
+      req(active_tab() == "Camera Trap", input$subtab == "Overall Effort")
       counts <- filtered() |> dplyr::count(station_id, name = "detections")
       sites <- station_pool() |>
         dplyr::left_join(counts, by = "station_id") |>
         dplyr::mutate(detections = tidyr::replace_na(detections, 0))
 
-      leaflet(sites) |>
-        addProviderTiles(providers$OpenStreetMap) |>
+      # Monitoring effort (trap nights), not detections, is what this map
+      # encodes - as a heat color (cool = low effort, hot = high effort)
+      # rather than point size, so every station stays equally easy to spot
+      # regardless of how long it was deployed.
+      pal <- leaflet::colorNumeric(palette = "YlOrRd", domain = sites$trap_nights)
+
+      kphp_grid_base_map(data$kphp_boundary, data$monitoring_grid) |>
         addCircleMarkers(
-          lng = ~longitude, lat = ~latitude,
-          radius = ~pmax(5, sqrt(detections) * 2),
-          color = "#1f77b4", fillOpacity = 0.75, stroke = FALSE,
+          data = sites, lng = ~longitude, lat = ~latitude,
+          radius = 8,
+          color = ~pal(trap_nights), fillColor = ~pal(trap_nights), fillOpacity = 0.85, stroke = FALSE,
           popup = ~sprintf("<b>%s</b><br>Status: %s<br>Trap Nights: %s<br>Detections: %d",
-                             station_id, status, scales::comma(trap_nights), detections)
+                             station_id, status, scales::comma(trap_nights), detections),
+          group = "Camera Stations"
         ) |>
-        add_kphp_boundary(data$kphp_boundary)
+        addLegend(
+          position = "bottomright", pal = pal, values = sites$trap_nights,
+          title = "Trap Nights", opacity = 0.9
+        ) |>
+        addLayersControl(
+          baseGroups = c("OpenStreetMap", "Esri.WorldImagery"),
+          overlayGroups = c("Camera Stations", "Camera Stations", "KPHP VII"),
+          options = layersControlOptions(collapsed = FALSE)
+        )
     })
 
     output$table <- renderDT({
-      req(input$subtab == "Overall Effort")
+      req(active_tab() == "Camera Trap", input$subtab == "Overall Effort")
       df <- filtered() |>
+        dplyr::left_join(dplyr::select(data$camera_sites, station_id, site), by = "station_id") |>
         dplyr::arrange(dplyr::desc(datetime)) |>
-        dplyr::select(Station = station_id, Species = common_name, Group = taxon_group,
-                       Status = conservation_status, DateTime = datetime, Count = count)
-      render_download_dt(df, filter = "top", order = list(list(4, "desc")))
+        dplyr::mutate(protected_label = ifelse(protected, "Protected", "Not Protected")) |>
+        dplyr::select(Site = site, Session = session, Station = station_id,
+                       `Scientific Name` = scientific_name, `Common Name` = common_name,
+                       DateTime = datetime, `IUCN Status` = conservation_status,
+                       Protected = protected_label)
+      render_download_dt(df, filter = "top", order = list(list(5, "desc")))
     })
 
     # ---- Species Information ---------------------------------------------------
     profile_data <- reactive({
       req(input$date_range, input$species_profile)
-      data$camera_detections |>
+      df <- data$camera_detections |>
         dplyr::filter(species_id == input$species_profile,
                        date >= input$date_range[1], date <= input$date_range[2],
                        station_id %in% station_pool()$station_id)
+      if (length(input$sessions) > 0) df <- dplyr::filter(df, as.character(session) %in% input$sessions)
+      df
+    })
+
+    # Independent events for the profiled species - basis for RAI (both the
+    # bar chart and the map).
+    profile_data_independent <- reactive({
+      req(input$date_range, input$species_profile)
+      df <- data$camera_independent_events |>
+        dplyr::filter(species_id == input$species_profile,
+                       date >= input$date_range[1], date <= input$date_range[2],
+                       station_id %in% station_pool()$station_id)
+      if (length(input$sessions) > 0) df <- dplyr::filter(df, as.character(session) %in% input$sessions)
+      df
     })
 
     output$species_card <- renderUI({
@@ -324,18 +388,18 @@ mod_camera_trap_server <- function(id, data) {
     })
 
     output$profile_rai <- renderPlotly({
-      df <- profile_data()
+      df <- profile_data_independent()
       req(nrow(df) > 0)
       rai <- df |>
         dplyr::group_by(station_id) |>
-        dplyr::summarise(detections = sum(count), .groups = "drop") |>
+        dplyr::summarise(events = dplyr::n(), .groups = "drop") |>
         dplyr::left_join(dplyr::select(data$camera_sites, station_id, trap_nights), by = "station_id") |>
-        dplyr::mutate(rai = detections / trap_nights * 100) |>
+        dplyr::mutate(rai = events / trap_nights * 100) |>
         dplyr::arrange(rai)
 
       p <- ggplot(rai, aes(x = rai, y = reorder(station_id, rai))) +
         geom_col(fill = "#1f77b4") +
-        labs(x = "RAI (detections / 100 trap-nights)", y = NULL) +
+        labs(x = "RAI (independent events / 100 trap-nights)", y = NULL) +
         theme_minimal(base_size = 12)
       ggplotly(p, tooltip = c("x", "y"))
     })
@@ -356,31 +420,40 @@ mod_camera_trap_server <- function(id, data) {
     })
 
     output$profile_map <- renderLeaflet({
-      counts <- profile_data() |> dplyr::count(station_id, name = "detections")
+      req(active_tab() == "Camera Trap", input$subtab == "Species Information")
+      counts <- profile_data_independent() |> dplyr::count(station_id, name = "events")
       sites <- station_pool() |>
-        dplyr::inner_join(counts, by = "station_id")
-
-      m <- leaflet(station_pool()) |>
-        addProviderTiles(providers$OpenStreetMap) |>
-        addCircleMarkers(
-          lng = ~longitude, lat = ~latitude, radius = 4,
-          color = "#c7c7c7", fillOpacity = 0.5, stroke = FALSE
+        dplyr::left_join(counts, by = "station_id") |>
+        dplyr::mutate(
+          events = tidyr::replace_na(events, 0),
+          rai = events / trap_nights * 100
         )
 
-      if (nrow(sites) > 0) {
-        m <- m |>
-          addCircleMarkers(
-            data = sites, lng = ~longitude, lat = ~latitude,
-            radius = ~pmax(6, sqrt(detections) * 2),
-            color = "#2c6e49", fillOpacity = 0.85, stroke = FALSE,
-            popup = ~sprintf("<b>%s</b><br>Detections: %d", station_id, detections)
-          )
-      }
-      m |> add_kphp_boundary(data$kphp_boundary)
+      # RAI (not raw event count) drives color here, same heat-scale
+      # convention as the Overall Effort map's trap-nights encoding - every
+      # station stays the same size regardless of RAI.
+      pal <- leaflet::colorNumeric(palette = "YlOrRd", domain = sites$rai)
+
+      kphp_grid_base_map(data$kphp_boundary, data$monitoring_grid) |>
+        addCircleMarkers(
+          data = sites, lng = ~longitude, lat = ~latitude, radius = 8,
+          color = ~pal(rai), fillColor = ~pal(rai), fillOpacity = 0.85, stroke = FALSE,
+          popup = ~sprintf("<b>%s</b><br>RAI: %.1f<br>Independent events: %d", station_id, rai, events),
+          group = "Camera Stations"
+        ) |>
+        addLegend(
+          position = "bottomright", pal = pal, values = sites$rai,
+          title = "RAI", opacity = 0.9
+        ) |>
+        addLayersControl(
+          baseGroups = c("OpenStreetMap", "Esri.WorldImagery"),
+          overlayGroups = c("KPHP VII", "Grid", "Camera Stations"),
+          options = layersControlOptions(collapsed = FALSE)
+        )
     })
 
     output$profile_table <- renderDT({
-      req(input$subtab == "Species Information")
+      req(active_tab() == "Camera Trap", input$subtab == "Species Information")
       df <- profile_data() |>
         dplyr::arrange(dplyr::desc(datetime)) |>
         dplyr::select(Station = station_id, DateTime = datetime, Count = count)

@@ -160,7 +160,7 @@ mod_smart_patrol_ui <- function(id) {
   )
 }
 
-mod_smart_patrol_server <- function(id, data) {
+mod_smart_patrol_server <- function(id, data, active_tab) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -330,7 +330,7 @@ mod_smart_patrol_server <- function(id, data) {
       # width calc needs the container to actually be on screen at render
       # time) - gating on the navset's own selected-tab input guarantees
       # this only (re)renders exactly when its tab is genuinely showing.
-      req(input$subtab == "Overview")
+      req(active_tab() == "SMART Patrol", input$subtab == "Overview")
       df <- patrols_f() |>
         dplyr::arrange(dplyr::desc(start_date)) |>
         dplyr::select(
@@ -440,7 +440,7 @@ mod_smart_patrol_server <- function(id, data) {
     })
 
     output$wildlife_table <- renderDT({
-      req(input$subtab == "Wildlife")
+      req(active_tab() == "SMART Patrol", input$subtab == "Wildlife")
       df <- wildlife_f() |>
         dplyr::mutate(Species = dplyr::coalesce(common_name_en, species_common)) |>
         dplyr::arrange(dplyr::desc(datetime)) |>
@@ -500,7 +500,7 @@ mod_smart_patrol_server <- function(id, data) {
     })
 
     output$threat_table <- renderDT({
-      req(input$subtab == "Human Activities")
+      req(active_tab() == "SMART Patrol", input$subtab == "Human Activities")
       df <- threats_f() |>
         dplyr::arrange(dplyr::desc(datetime)) |>
         dplyr::select(DateTime = datetime, Team = team_name, `Finding Type` = finding_type,
